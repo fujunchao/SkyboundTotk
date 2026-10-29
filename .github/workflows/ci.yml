@@ -54,10 +54,16 @@ jobs:
           # (the source list comes from build.py itself, so it cannot drift from what the real build compiles)
           $srcs = (python -c "import sys; sys.path.insert(0,'a64-kit'); import build; print(chr(10).join(build.gpu_sources()))") -split "`n" | Where-Object { $_ }
           Write-Host ("compile-checking {0} files" -f $srcs.Count)
-          $srcs | Set-Content -Encoding ascii gpu_sources.rsp
-          # (the same flags build.py native uses for the renderer, minus the code generation)
+          # (a response file: 160 paths do not fit on one command line. Forward slashes, LF only: clang reads a
+          #  backslash in a response file as an escape and turned D:\a\... into D:a..., which failed as
+          #  "no such file or directory" for every path - run 40852811925.)
+          $lines = $srcs | ForEach-Object { '"' + $_.Replace('\', '/') + '"' }
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'gpu_sources.rsp'), ($lines -join "`n"),
+                                  (New-Object System.Text.UTF8Encoding($false)))
+          # (the same flags build.py native uses for the renderer, minus the code generation; A64_WRITE_TRACK is the
+          #  default soft write watch the renderer reads, and it selects code in rx_buffer.cpp and rx_nvn.cpp)
           clang++ --target=x86_64-pc-windows-msvc -fms-extensions -D_CRT_SECURE_NO_WARNINGS `
-            -std=c++20 -fsyntax-only -DNDEBUG -Wno-everything `
+            -std=c++20 -fsyntax-only -DNDEBUG -Wno-everything -DA64_WRITE_TRACK `
             -I a64-kit/gpu/compat -I a64-kit/gpu/third_party/suyu -I third_party/wgpu-native/include `
             "@gpu_sources.rsp"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
