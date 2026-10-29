@@ -1,0 +1,167 @@
+# The full build (lift + compile + link) of SkyboundTOTK on GitHub Actions.
+#
+# It needs a runner that holds the user's own TOTK 1.0.0 ExeFS and RomFS (they can never be committed) and about
+# 50-70 GB of free disk: self-hosted by default, or a larger GitHub-hosted runner (a 14 GB windows-latest cannot do
+# it). The lift is reused across runs through the persistent build_root folder; a change to the lift inputs (lift/hos/
+# rt sources, build.py, nso.py, hot_funcs.txt, the ExeFS modules) makes it lift again from scratch.
+#
+#   gh workflow run build.yml -f runner=self-hosted -f game_dir=D:\totk\game -f build_root=D:\ci\build
+#
+# Nothing game-derived is published: the artifact is private to the repository and holds totk.exe + image.bin only.
+# See .github/ACTIONS.md.
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label: self-hosted, or the label of a larger runner"
+        type: string
+        default: self-hosted
+      game_dir:
+        description: "Folder holding exefs/ and romfs/ (the user's own 1.0.0 dump; never committed)"
+        type: string
+        default: "D:\\totk\\game"
+      build_root:
+        description: "Persistent build folder, reused by the next run when the lift inputs match"
+        type: string
+        default: "D:\\ci\\build"
+      opt:
+        description: "Optimization of the lifted code (O1 builds faster, O3 is the default in build.py)"
+        type: choice
+        options: [O1, O2, O3]
+        default: O3
+      upload_public:
+        description: "Upload the game-derived artifact even though this repository is public (copyright: leave false)"
+        type: boolean
+        default: false
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: build-totk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
+    timeout-minutes: 360
+    env:
+      BUILD_ROOT: ${{ inputs.build_root || 'D:\\ci\\build' }}
+      GAME_DIR: ${{ inputs.game_dir || 'D:\\totk\\game' }}
+      OPT: ${{ inputs.opt || 'O3' }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out the sources
+        uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the toolchain, the game files and the disk
+        shell: powershell   # (Windows PowerShell 5.1: present on every Windows runner, self-hosted too)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --quiet --upgrade lz4
+          clang --version
+          clang++ --version
+          lld --version
+          if (-not (Test-Path "$env:GAME_DIR\exefs\main") -or -not (Test-Path "$env:GAME_DIR\exefs\sdk")) {
+            throw "no TOTK 1.0.0 ExeFS at $env:GAME_DIR\exefs (the runner must hold the user's own dump; see .github/ACTIONS.md)"
+          }
+          New-Item -ItemType Directory -Force $env:BUILD_ROOT | Out-Null
+          $drive = (Split-Path -Qualifier $env:BUILD_ROOT).TrimEnd(':')
+          $free = (Get-PSDrive $drive).Free / 1GB
+          "free space on {0}: {1:N1} GB" -f $drive, $free
+          if ($free -lt 50) { throw ("the build needs about 50 GB free (README.md: 45 GB plus the dump); {0:N1} GB left" -f $free) }
+
+      - name: Drop the lifted code if the lift inputs changed
+        working-directory: src
+        shell: powershell   # (Windows PowerShell 5.1: present on every Windows runner, self-hosted too)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # (build_game.py's identity: lift/hos/rt sources, build.py, nso.py, hot_funcs.txt and the ExeFS modules)
+          $want = (python -c "import sys,pathlib; sys.path.insert(0,'.'); import build_game; print(build_game.lift_identity(pathlib.Path(r'$env:GAME_DIR/exefs')))").Trim()
+          "lift identity: $want"
+          $want | Set-Content -Encoding ascii "$env:RUNNER_TEMP/lift-identity.txt"
+          $image = Join-Path $env:BUILD_ROOT 'totk/image/image.json'
+          $stamp = Join-Path $env:BUILD_ROOT 'totk/lift-input.sha256'
+          if (Test-Path $image) {
+            $built = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
+            if ($built -ne $want) {
+              Write-Host "the existing lift was made from other inputs (or is of unknown origin): removing $env:BUILD_ROOT"
+              Remove-Item -Recurse -Force $env:BUILD_ROOT
+            } else {
+              Write-Host "lift inputs unchanged: the existing lift is reused"
+            }
+          }
+          New-Item -ItemType Directory -Force $env:BUILD_ROOT | Out-Null
+
+      - name: Lift the game code (AArch64 to C)
+        working-directory: src
+        shell: powershell   # (Windows PowerShell 5.1: present on every Windows runner, self-hosted too)
+        run: |
+          # (a complete lift is image.json, the generated suyu runtime, and at least one code file: an interrupted
+          #  lift leaves some of them and must not be reused, see build_game.py's own completeness check)
+          $complete = (Test-Path "$env:BUILD_ROOT\totk\image\image.json") -and
+                      (Test-Path "$env:BUILD_ROOT\totk\gen\a64_suyu.h") -and
+                      @(Get-ChildItem "$env:BUILD_ROOT\totk\gen\code_*.c" -ErrorAction SilentlyContinue).Count -gt 0
+          if ($complete) {
+            Write-Host "the existing lift is complete: lifting skipped"
+          } else {
+            python a64-kit/build.py lift totk --exefs "$env:GAME_DIR/exefs" --skip subsdk0 --build "$env:BUILD_ROOT"
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            Copy-Item "$env:RUNNER_TEMP/lift-identity.txt" "$env:BUILD_ROOT\totk\lift-input.sha256"
+          }
+
+      - name: Compile and link (clang, ThinLTO)
+        working-directory: src
+        shell: powershell   # (Windows PowerShell 5.1: present on every Windows runner, self-hosted too)
+        run: |
+          python a64-kit/build.py native totk --build "$env:BUILD_ROOT" --wgpu third_party/wgpu-native --opt "$env:OPT"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Collect the outputs
+        if: success()
+        shell: powershell   # (Windows PowerShell 5.1: present on every Windows runner, self-hosted too)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:GITHUB_WORKSPACE\out"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item "$env:BUILD_ROOT\totk\native\totk.exe" $out
+          Copy-Item "$env:BUILD_ROOT\totk\native\*.dll" $out
+          Copy-Item "$env:BUILD_ROOT\totk\image\image.bin" $out
+          Copy-Item "$env:BUILD_ROOT\totk\image\image.json" $out
+          Copy-Item "$env:BUILD_ROOT\totk\image\mod_patches.txt" $out -ErrorAction SilentlyContinue
+          Copy-Item "$env:BUILD_ROOT\totk\gen\indirect_br.txt" $out -ErrorAction SilentlyContinue
+          Copy-Item "$env:BUILD_ROOT\totk\gen\jump_tables_missing.txt" $out -ErrorAction SilentlyContinue
+          Get-ChildItem $out | Select-Object Name, Length
+
+      - name: Note that the artifact stays on the runner
+        if: success() && !(github.event.repository.private == true || inputs.upload_public)
+        shell: powershell
+        run: |
+          Write-Host "This repository is public: the build (an exe and image.bin made from the game) is NOT uploaded."
+          Write-Host "It stays in $env:BUILD_ROOT. Make the repository private, or set upload_public=true, to upload it."
+
+      - name: Upload the build (private to this repository, it holds game-derived data)
+        if: success() && (github.event.repository.private == true || inputs.upload_public)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyboundTOTK-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 7
+          path: out/
+
+      - name: Report the lift coverage
+        if: always()
+        shell: powershell   # (Windows PowerShell 5.1: present on every Windows runner, self-hosted too)
+        run: |
+          foreach ($f in 'indirect_br.txt', 'jump_tables_missing.txt') {
+            $p = Join-Path $env:BUILD_ROOT "totk/gen/$f"
+            if (Test-Path $p) { "$f: " + (Get-Content $p | Measure-Object -Line).Lines + " lines" }
+          }

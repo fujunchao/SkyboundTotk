@@ -1,0 +1,58 @@
+# Checks that need no game files: every Python file byte-compiles, a64emit (the instruction translator) builds and
+# translates, and the renderer + suyu's shader recompiler (about 74k lines of C++ they are built from) compile.
+#
+# What cannot run here: the lifted game code and hos/ include build/<name>/gen/a64_suyu.h and a64_fpx.h, which only
+# the lift produces from the game's ExeFS. A full compile needs a runner that holds the game dump: see build.yml and
+# .github/ACTIONS.md.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: windows-2022          # (pinned: -latest moves to newer images; the build is clang-version sensitive)
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Byte-compile every Python file
+        shell: pwsh
+        run: python -m compileall -q a64-kit ports build_game.py
+
+      - name: Report the toolchain
+        shell: pwsh
+        run: |
+          clang --version
+          clang++ --version
+          lld --version
+
+      - name: Build a64emit and translate a few instructions
+        shell: pwsh
+        run: python a64-kit/tests/emit_smoke.py
+
+      - name: Compile-check the renderer and the shader recompiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # (the source list comes from build.py itself, so it cannot drift from what the real build compiles)
+          $srcs = (python -c "import sys; sys.path.insert(0,'a64-kit'); import build; print(chr(10).join(build.gpu_sources()))") -split "`n" | Where-Object { $_ }
+          Write-Host ("compile-checking {0} files" -f $srcs.Count)
+          $srcs | Set-Content -Encoding ascii gpu_sources.rsp
+          # (the same flags build.py native uses for the renderer, minus the code generation)
+          clang++ --target=x86_64-pc-windows-msvc -fms-extensions -D_CRT_SECURE_NO_WARNINGS `
+            -std=c++20 -fsyntax-only -DNDEBUG -Wno-everything `
+            -I a64-kit/gpu/compat -I a64-kit/gpu/third_party/suyu -I third_party/wgpu-native/include `
+            "@gpu_sources.rsp"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
