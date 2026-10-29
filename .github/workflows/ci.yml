@@ -34,9 +34,14 @@ jobs:
       - name: Report the toolchain
         shell: pwsh
         run: |
+          # ("lld --version" is not it: the generic driver prints how to pick a flavour and exits 1. build.py copies
+          #  lld to lld-link.exe itself, so only its presence on PATH matters here.)
           clang --version
           clang++ --version
-          lld --version
+          foreach ($tool in 'clang', 'clang++', 'lld') {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool is not on PATH" }
+          }
+          "lld: " + (Get-Command lld).Source
 
       - name: Build a64emit and translate a few instructions
         shell: pwsh

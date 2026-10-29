@@ -69,7 +69,10 @@ jobs:
           python -m pip install --quiet --upgrade lz4
           clang --version
           clang++ --version
-          lld --version
+          foreach ($tool in 'clang', 'clang++', 'lld') {
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool is not on PATH (see .github/ACTIONS.md)" }
+          }
+          "lld: " + (Get-Command lld).Source
           if (-not (Test-Path "$env:GAME_DIR\exefs\main") -or -not (Test-Path "$env:GAME_DIR\exefs\sdk")) {
             throw "no TOTK 1.0.0 ExeFS at $env:GAME_DIR\exefs (the runner must hold the user's own dump; see .github/ACTIONS.md)"
           }
