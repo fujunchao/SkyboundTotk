@@ -37,10 +37,11 @@ python a64-kit/tests/insn_test.py TOTK/image --per 8 --states 12 --fpsr
 
 | Path | What |
 |---|---|
-| `tools/nx.py` | NSP (PFS0) → NCA → ExeFS / RomFS. AES-XTS header, AES-CTR sections, keys from `~/.switch/prod.keys` (never printed) |
+| `tools/nx.py` | NSP (PFS0) or XCI (gamecard) → NCA → ExeFS / RomFS. AES-XTS header, AES-CTR sections, keys from `~/.switch/prod.keys` (never printed). An XCI's card header is encrypted per card, so its partitions are found through the plaintext HFS0 tables |
 | `tools/nso.py` | NSO loader: LZ4 segments, MOD0, dynamic section, symbols, relocations, init_array, `.eh_frame_hdr` function starts |
 | `tools/survey.py` | Instruction census of a module's `.text` |
 | `tools/toolchain.py` | emsdk clang/lld lookup, native target flags |
+| `tests/emit_smoke.py` | Builds `a64emit` and translates a few instruction forms: the cheapest check that the lifter's instruction pipeline is intact (no game data needed) |
 | `hos/nx_image.py` | The image builder (rtld's job at build time) |
 | `hos/hos_main.c` | Native process start (loads the image; booting is next) |
 | `lift/a64_lift.py` | The lifter |
