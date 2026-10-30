@@ -1,7 +1,9 @@
 /* nn::oe (applet), nn::account, nn::time, nn::pl, nn::err: what a game asks the system about itself.
-   The answers describe a docked console in English with one user, "Player". */
+   The answers describe a docked console with one user, "Player", in the language HOS_LANGUAGE picks (default en-US). */
 #include "hos.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #ifdef __EMSCRIPTEN__
 #include <windows.h>   /* (the browser build: the Microsoft C runtime's time functions) */
@@ -12,11 +14,23 @@ static int64_t boot_ns;
 /* ---- nn::oe ------------------------------------------------------------------------------------------------- */
 HLE(_ZN2nn2oe10InitializeEv) { if (!boot_ns) boot_ns = hos_now_ns(); }
 HLE(_ZN2nn2oe17FinishStartupLogoEv) { hos_log("oe: startup logo finished"); }
-/* GetDesiredLanguage() -> settings::LanguageCode (char[8]) by value */
+/* GetDesiredLanguage() -> settings::LanguageCode (char[8]) by value.
+   HOS_LANGUAGE=<code> (zh-Hans, zh-Hant, ja, en-US, ...: 7 characters at most) is what the game takes its text
+   language from; its own options menu holds the voice language, which starts from this one. */
 HLE(_ZN2nn2oe18GetDesiredLanguageEv) {
-    uint64_t v = 0;
-    memcpy(&v, "en-US", 5);
-    RET(v);
+    static uint64_t code;
+    if (!code) {
+        const char *want = getenv("HOS_LANGUAGE");
+        char text[8] = {'e', 'n', '-', 'U', 'S', 0, 0, 0};
+        if (want && *want) {
+            const size_t n = strlen(want) < sizeof text ? strlen(want) : sizeof text;
+            memset(text, 0, sizeof text);
+            memcpy(text, want, n);
+        }
+        memcpy(&code, text, sizeof text);
+        hos_log("oe: desired language \"%s\"", (const char *)&code);
+    }
+    RET(code);
 }
 HLE(_ZN2nn2oe16GetOperationModeEv) { RET(1); }        /* OperationMode_Console (docked) */
 HLE(_ZN2nn2oe18GetPerformanceModeEv) { RET(1); }      /* PerformanceMode_Boost (docked) */
