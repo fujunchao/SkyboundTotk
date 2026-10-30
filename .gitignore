@@ -2,6 +2,7 @@
 /game/
 /build/
 /dist/
+/user/
 *.nsp
 *.xci
 *.nca
